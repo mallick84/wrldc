@@ -1,0 +1,317 @@
+---
+title: "wrldc_report"
+author: "softanbees"
+date: "22/07/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load the libries 
+
+
+```{r echo=TRUE}
+
+library(tidyverse)
+library(timetk)
+library(lubridate)
+#library(skimr)
+library(DataExplorer)
+
+
+```
+
+## Upload Data and data preparations
+### convert the Date colum to timeseries. Try to find out any abnormilities or missing values.
+
+
+```{r echo=TRUE}
+
+state_gen <- vroom::vroom(file = 'data/state.csv')
+
+skim(state_gen)
+
+## convert the date column character to time series
+
+state_gen1 <- state_gen %>%
+  
+  ### modifyingthetimestamp column.
+  
+  mutate(timestamp = seq(
+    as.POSIXct("2021-05-01 00:00:00"), 
+    length.out = 2976, by = "15 min")) %>% 
+  select(-Date) %>% 
+  ### relocating column positions
+  
+  relocate(timestamp, .before = 'CHHATTISGARH_Schedule') %>%
+  
+  ### summing total schedule, drawl, deviations per block
+  
+ mutate( total_schedule = state_gen %>% 
+           select(ends_with('Schedule')) %>% 
+           rowSums(na.rm = TRUE),
+         total_drawl = state_gen %>% 
+           select(ends_with('Drawal')) %>% 
+           rowSums(na.rm = TRUE),
+         total_dviation = state_gen %>% 
+           select(ends_with('Deviation')) %>% 
+           rowSums(na.rm = TRUE))
+  
+  
+  
+ 
+          
+
+ 
+skimr::skim(state_gen1)
+
+```
+
+## Some visualisation
+### Gujrat schedule
+
+```{r echo=TRUE}
+
+#week wise
+
+state_gen1 %>%
+    plot_time_series(timestamp, GUJARAT_Schedule, .color_var = week(timestamp),
+                     .interactive = TRUE, .color_lab = "Week")
+
+#daywise wise
+
+state_gen1 %>%
+    plot_time_series(timestamp, total_drawl, .color_var = day(timestamp),
+                     .interactive = TRUE, .color_lab = "day")
+
+```
+
+## Some visualisation
+### groupwise visualisations
+
+```{r echo=TRUE}
+
+#total operation
+
+state_gen1 %>% 
+  select(1,30:33) %>%
+  pivot_longer(-timestamp) %>%
+  group_by(name)%>%
+    plot_time_series(.date_var = timestamp,
+                     .value =   value, 
+                     .color_var = name,
+                     .facet_ncol = 2,
+                     .interactive = TRUE,
+                     .smooth = FALSE)
+
+## facet
+
+state_gen1 %>% 
+  select(1,30:33) %>%
+  pivot_longer(-timestamp) %>%
+  #group_by(name)%>%
+    plot_time_series(.date_var = timestamp,
+                     .value =   value, 
+                     .color_var = name,
+                     .facet_vars = name,
+                     .interactive = TRUE,
+                     .smooth = FALSE)
+
+
+
+```
+
+
+
+## Visualize anomalies
+
+### we can collapse all the trends in single plots and find out anamolies
+
+```{r echo=FALSE}
+
+state_gen1 %>% 
+  select(1,30:33) %>%
+  pivot_longer(-timestamp) %>%
+  group_by(name)%>%
+    plot_anomaly_diagnostics(timestamp, value, 
+                             .facet_ncol = 2, 
+                             .interactive = TRUE)
+
+
+## comparing plot
+
+state_gen1 %>% 
+  select(1,30:33) %>%
+  pivot_longer(-timestamp) %>%
+  group_by(name)%>%
+    plot_anomaly_diagnostics(.date_var = timestamp,
+                             .value =  value, 
+                             .facet_ncol = 2
+                             )
+
+
+
+```
+
+## RANGE REDUCTION ----
+### - Used in visualization to overlay series
+### - Used in ML for models that are affected by feature magnitude (e.g. linear regression)
+
+### * Normalize to Range (0,1) ----
+### - INFO: recipes::step_range() is actually normalization to range(0,1)
+
+
+```{r echo=TRUE}
+
+## Composite plote
+state_gen1 %>%
+  select(1,contains('Schedule')) %>%
+  pivot_longer(-timestamp) %>%
+ ungroup()%>%
+  plot_time_series(.date_var =  timestamp,
+                   .value =  value,
+                   .color_var = name,
+                   .smooth = FALSE,
+                   .facet_collapse = TRUE)
+
+
+
+
+### Normalisation plot
+
+state_gen1 %>%
+  select(1,contains( 'Deviation')) %>%
+  pivot_longer(-timestamp) %>%
+  mutate(normalise = normalize_vec(value)) %>%
+  ungroup()%>%
+  plot_time_series(.date_var =  timestamp,
+                   .value =  normalise,
+                   .color_var = name,
+                   .smooth = FALSE,
+                   .facet_collapse = TRUE)
+
+# * Standardize to Mean = 0 (Center), SD = 1 (Scaling) -----
+# - INFO: recipes::step_normalize() is actually standardization to mean = 0, sd = 1
+
+## deviations
+
+state_gen1 %>%
+  select(1,contains( 'Deviation')) %>%
+  pivot_longer(-timestamp) %>%
+  mutate(standardise = standardize_vec(value)) %>%
+  ungroup()%>%
+  plot_time_series(.date_var =  timestamp,
+                   .value =  standardise,
+                   .color_var = name,
+                   .smooth = FALSE
+                   )
+
+
+## Anomaly in Drawl
+#par(mar = c(.1, .1, 4, 4))
+
+state_gen1 %>%
+  select(1,contains( 'Drawal')) %>%
+  pivot_longer(-timestamp) %>%
+  group_by(name)%>%
+    plot_anomaly_diagnostics(.date_var = timestamp,
+                             .value =  value, 
+                             .facet_ncol = 3
+                             )
+
+### table only the anomaly data
+
+state_gen1 %>%
+  select(1,contains( 'Drawal')) %>%
+  pivot_longer(-timestamp) %>%
+  group_by(name)%>%
+    tk_anomaly_diagnostics(.date_var = timestamp,
+                             .value =  value
+                             )
+
+
+
+```
+
+
+```{r echo=True}
+
+state_gen1 %>%
+  select(1,contains( 'Schedule')) %>%
+  pivot_longer(-timestamp) %>%
+  group_by(name)%>%
+    plot_seasonal_diagnostics(.date_var =  timestamp, 
+                              .value =  value
+                              )
+
+
+par(mar=c(0,0,0,1))
+
+
+ state_gen1 %>%
+  select(1,contains( 'Schedule')) %>%
+  pivot_longer(-timestamp) %>%
+  group_by(name)%>%
+    plot_seasonal_diagnostics(.date_var =  timestamp, 
+                              .value =  log(value + 1), .feature_set = 'week', .facet_vars = name
+                              )
+ 
+ state_gen1 %>%
+  select(1,contains( 'Schedule')) %>%
+  pivot_longer(-timestamp) %>%
+  group_by(name)%>%
+    plot_seasonal_diagnostics(.date_var =  timestamp, 
+                              .value =  log(value + 1), 
+                              .feature_set = 'wday.lbl', 
+                              .facet_vars = name
+                              )
+
+
+```
+
+
+### Summarise across group data
+
+```{r echo=TRUE}
+# * To Daily - GA Summary ----
+
+state_gen1_daily <- state_gen1 %>%
+  select(1,contains( c('Schedule', 'Drawal'))) %>%
+  summarise_by_time(
+    .date_var = timestamp, 
+    .by       = 'day',
+    across(.cols = CHHATTISGARH_Schedule:BARC_Drawal, .fns = sum)
+  )
+
+state_gen1_daily
+
+state_gen1_daily  %>%
+  pivot_longer(cols = CHHATTISGARH_Schedule:BARC_Drawal) %>%
+  plot_time_series(timestamp, .value = value, .facet_vars = name, .smooth = FALSE, .facet_ncol = 3, .facet_scales = 'free', .facet_collapse_sep = TRUE)
+
+
+```
+
+### Data explore
+
+```{r echo=FALSE}
+state_gen1_daily <- state_gen1 %>%
+  summarise_by_time(
+    .date_var = timestamp, 
+    .by       = 'day',
+    across(.cols = CHHATTISGARH_Schedule:BARC_Drawal, .fns = sum)
+  )
+
+
+create_report(data = state_gen1_daily, 
+                            report_title = 'Full Analytical report for the month of May', 
+                            y = 'MADHYAPRADESH_Schedule')
+
+
+
+```
+
+```
+
