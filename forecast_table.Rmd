@@ -201,7 +201,7 @@ Review the visualization selecting one feature at a time and answering the follo
     
     - Do the rolling lags present any issues? 
     - Which rolling lag captures the trend the best?
-    - Do you expect either of the Product Events features to help?
+    - Do you expect either of the weekend Events features to help?
 
 ```{r}
 full_tbl %>%
@@ -378,11 +378,11 @@ Questions:
 - Did modeltime auto-generate a frequency for ARIMA?
 - Is this a seasonal model?
 
-### Model 2 - Add Product Events
+### Model 2 - Add weekend Events
 
 Next, repeat the model this time adding events:
 
-- Modify the previous formula to include `event_november_sale` and `event_product_launch`
+- Modify the previous formula to include `event_may_weekend` and `event_weekend_launch`
 - Store the object as `model_fit_2_arima_xregs`
 - Print the output to the screen. 
 
@@ -408,7 +408,7 @@ model_fit_2_arima_xregs
 
 ```
 
-### Model 3 - Add Seasonality + Product Events
+### Model 3 - Add Seasonality + weekend Events
 
 Use `plot_acf_diagnostics()` to inspect the ACF of your ARIMA model as follows:
 
@@ -495,7 +495,7 @@ model_fit_4_arima_sarimax  <- read_rds("data/model_fit_4_arima_sarimax.rds")
 model_fit_4_arima_sarimax
 ```
 
-### Model 5 - Use Fourier Terms + Product Events instead of Seasonality
+### Model 5 - Use Fourier Terms + weekend Events instead of Seasonality
 
 Last try to improve the Auto ARIMA model. Let's add a fourier series at period = 4 to try to capture the strong ACF in Lag 4.
 
@@ -646,9 +646,9 @@ model_fit_7_prophet_yearly  <- read_rds("data/model_fit_7_prophet_yearly.rds")
 model_fit_7_prophet_yearly
 ```
 
-### Model 8 - Product Events
+### Model 8 - weekend Events
 
-Let's try one without yearly seasonality but now adding events. Make `model_fit_8_prophet_events` using the default settings for `prophet_reg()` and updating the fitting formula to include `event_november_sale` and `event_product_launch`. 
+Let's try one without yearly seasonality but now adding events. Make `model_fit_8_prophet_events` using the default settings for `prophet_reg()` and updating the fitting formula to include `event_november_weekend` and `event_weekend_launch`. 
 
 ```{r}
 # model_fit_8_prophet_events <- prophet_reg() %>%
