@@ -1,0 +1,1008 @@
+---
+title: "forecasting total demand of WRLDC for the month of June 2021"
+author: "Softanbees"
+date: "31/07/2021"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+    echo = TRUE,
+    message = F,
+    warning = F,
+    paged.print = FALSE, 
+    # This should allow Rmarkdown to locate the data
+    root.dir = rprojroot::find_rstudio_root_file()
+)
+```
+
+# Challenge Objective
+
+Your goal is to perform an 15-min total_drawl forecast. You'll need to engineer features that help. In this challenge, you'll:
+
+1. Add event data to the state total_drawl dataset 
+2. Preprocess the data
+3. Create multiple `recipes`
+3. Implement a `modeltime` forecasting workflow using multiple linear regression workflow objects
+
+
+# Libraries
+
+```{r}
+# Modeling
+library(tidymodels)
+library(modeltime)
+
+# Core
+library(tidyverse)
+library(timetk)
+library(lubridate)
+library(janitor)
+```
+
+
+# Collect Data
+
+Read in the following data sets. 
+
+## state total_drawl
+
+```{r}
+state_tbl  <- read_rds("data/state_gen1.rds")
+
+state_tbl
+
+```
+
+# Preparing Data
+
+We will find the total demand from the state so we will only select the total_drawl column
+
+```{r}
+state_tbl_dem <- state_tbl %>% 
+  select(timestamp, total_drawl)
+
+state_tbl_dem
+
+```
+
+# Preparing Data
+
+
+
+Our objectives are to:
+
+- Aggregate data to common time-stamps
+- Apply any transformations
+- Detect any lags & add rolling features
+- Create a Full Data Set: Adding Future observations, lags, and external regressors
+
+
+## Aggregate total_drawl by hour
+
+1. Start with `state_tbl`
+2. Use `summarise_by_time()` with `.by = "hour"`, and `sum()` the total_drawl.
+3. Save as a new variable called `state_daily_tbl`
+
+```{r}
+state_daily_tbl <- state_tbl_dem %>%
+  mutate(sunday = ifelse(weekdays(timestamp) == 'Sunday',1,0),
+         saturday = ifelse(weekdays(timestamp) == 'Saturday',1,0))
+    
+
+
+state_daily_tbl 
+
+```
+
+
+
+## Aggregate Events by hour
+
+1. Start with `demand_events_tbl`
+2. Use `add_column()` to create a column called "event_val". Set the values in the column to `1`. 
+3. Use `group_by()` to group on the "event" column.
+4. Use `summarise_by_time()` with `.by = "hour"`, and `sum()` the "event_val" column.
+5. Ungroup the data. 
+6. Pivot the data wider so we have a "date" column:
+    - Use: `names_from   = event`
+    - Use: `values_from  = event_val`
+    - Use: `values_fill  = 0`
+    - Use: `names_prefix = "event_"`
+7. Clean the names with `janitor::clean_names()`
+7. Save as a new variable called `demand_events_daily_tbl`
+
+# Visualizations
+
+## Visualize total_drawl
+
+Use `plot_time_series()` to visualize the total_drawl. 
+
+- Look for outliers & any data issues
+- Try out a `log()` transformation to see the effect on the time series
+
+```{r}
+state_daily_tbl %>% 
+    plot_time_series(timestamp, log(total_drawl))
+
+```
+
+We'll use these parameters to create our "full dataset". We've selecte an 8-hour forecast horizon. Our lag period is 8 hours and we'll try out a few rolling averages at various aggregations. 
+
+```{r}
+
+state_daily_tbl %>%
+  plot_acf_diagnostics(.date_var = timestamp, .value = total_drawl)
+
+
+horizon         <- 96
+lag_period      <- 96
+rolling_periods <- c(4, 8, 16, 24, 36,72)
+```
+
+
+
+## Prepare the full data
+
+Next, join the aggregated daily state total_drawl data and the demand events data. 
+
+1. Start with `state_daily_tbl`
+2. __Add the future window:__ Use `bind_rows()` and `future_frame()` to extend the data frame `.length_out = horizon`.
+3. __Add autocorrelated lags:__ Use `tk_augment_lags()` to add a `.lags = lag_period`
+4. __Add rolling features from our lag__: Use `tk_agument_slidify()` to add `.period = rolling_periods`. Use `mean` as the rolling function. Make sure to "center" with "partial" windows. 
+5. __Add events__:
+    - Left join `demand_events_daily_tbl`
+    - Fill in the missing values with zero for any column that start with "event_"
+6. Rename any columns that contain "lag". Modify to start with "lag_"
+6. Save the output as `full_tbl`.
+
+
+
+
+
+```{r}
+full_tbl <- state_daily_tbl %>%
+    
+    # Add future window
+    bind_rows(
+        future_frame(.data = ., .date_var = timestamp, .length_out = horizon)
+    ) %>%
+    
+    # Add autocorrelated lags
+    tk_augment_lags(total_drawl, .lags = c(30,64,96)) %>%
+    
+    # Add rolling features
+    tk_augment_slidify(
+        .value   = total_drawl,
+        .f       = mean, 
+        .period  = rolling_periods,
+        .align   = "center",
+        .partial = TRUE
+    ) %>%
+  mutate(across(ends_with("day"), .fns = ~ ifelse(is.na(.), 0, .))) %>%
+    
+  
+    # Rename columns
+    rename_with(.cols = contains("lag"), .fn = ~ str_c("lag_", .))
+
+full_tbl %>% glimpse()
+
+```
+## Visualize the Full Data
+
+Visualize the features, and review what you see. 
+
+1. Start with `full_tbl`
+2. `pivot_longer` every column except "timestamp"
+3. Use `plot_time_series()` to visualize the time series coloring by "name". 
+
+Review the visualization selecting one feature at a time and answering the following questions:
+    
+    - Do the rolling lags present any issues? 
+    - Which rolling lag captures the trend the best?
+    - Do you expect either of the Product Events features to help?
+
+```{r}
+full_tbl %>%
+    pivot_longer(-timestamp) %>%
+    plot_time_series(timestamp, value, name, .smooth = FALSE)
+
+```
+
+Create a `data_prepared_tbl` by filtering `full_tbl` where "total_drawl" is non-missing. 
+
+```{r}
+data_prepared_tbl <- full_tbl %>%
+    filter(!is.na(total_drawl))
+data_prepared_tbl
+```
+
+
+
+
+
+Create a `forecast_tbl` by filtering `full_tbl` where "demand" is missing. 
+
+```{r}
+forecast_tbl <- full_tbl %>%
+    filter(is.na(total_drawl))
+forecast_tbl
+```
+
+
+# Train / Test Split
+
+```{r}
+#data_prepared_tbl %>% write_rds("data/data_prepared_tbl.rds")
+ #forecast_tbl %>% write_rds("data/forecast_tbl.rds")
+
+# Checkpoint data
+data_prepared_tbl <- read_rds("data/data_prepared_tbl.rds")
+forecast_tbl      <- read_rds("data/forecast_tbl.rds")
+```
+
+
+## Split into Train / Test Sets
+
+- Start with `data_prepared_tbl`
+- Use `time_series_split()` to create a single time series split. 
+    - Set `assess = horizon` to get the last 8-weeks of data as testing data. 
+    - Set `cumulative = TRUE` to use all of the previous data as training data. 
+- Save the object as `splits`
+
+```{r}
+splits <- data_prepared_tbl %>% 
+    time_series_split(assess = horizon, cumulative = TRUE)
+splits
+```
+
+
+
+# Feature Engineering
+
+```{r}
+#write_rds(splits, "data/splits.rds")
+
+# Checkpoint data
+splits <- read_rds("data/splits.rds")
+```
+
+
+## Create a Preprocessing recipe
+
+Make a preprocessing recipe using `recipe()`. Note - It may help to `prep()` and `juice()` your recipe to see the effect of your transformations. 
+
+- Start with `recipe()` using "total_drawl ~ ." and `data = training(splits)`
+- Add the following steps:
+    - `step_timeseries_signature()` using the date feature
+    - Remove any newly created features that:
+        - Contain ".iso"
+        - End with "xts"
+        - Contain "day", "hour", "minute", "second" or "am.pm" (because this is a weekly dataset and these features won't add any predictive value)
+    - Normalize all numeric data except for "total_drawl" (the target) with `step_normalize()`.
+    - Dummy all categorical features with `step_dummy()`. Set `one_hot = TRUE`.
+    - Add a fourier series at periods 4 and 20. Set K = 2 for both. 
+
+```{r}
+
+
+recipe_spec_base <- recipe(total_drawl ~ ., data = training(splits)) %>%
+    
+    # Time Series Signature
+    step_timeseries_signature(timestamp) %>%
+    step_rm(matches("(iso)|(year)|(half)|(quarter)|(month)|(.xts)|(qday)|(am.pm)")) %>%
+    
+    # Standardization
+    step_normalize(matches("(index.num)|(yday)")) %>%
+    
+    # Dummy Encoding (One Hot Encoding)
+    step_dummy(all_nominal(), one_hot = TRUE) %>%
+    
+    # Fourier - 4 Week ACF
+    step_fourier(timestamp, period = c(4, 32, 64), K = 2)
+
+recipe_spec_base %>% prep() %>% juice() %>% glimpse()
+```
+
+
+# Modeling
+
+```{r}
+#write_rds(recipe_spec_base, "data/recipe_spec_base.rds")
+
+# Checkpoint data
+recipe_spec_base <- read_rds("data/recipe_spec_base.rds")
+```
+
+
+Visualize the train/test split.
+
+- Use `tk_time_series_cv_plan()` to convert the `splits` object to a data frame that can be plotted
+- Plot the train/test split using `plot_time_series_cv_plan()`
+
+```{r}
+splits %>%
+    tk_time_series_cv_plan() %>%
+    plot_time_series_cv_plan(timestamp, total_drawl)
+
+```
+# Modeling 
+
+Now that we have a feel for the training and testing data, let's dive into modeling. There are 3 Sections:
+
+- __ARIMA:__ Models 1-5
+- __Prophet:__ Models 6-9
+- __Exponential Smoothing & TBATS:__  Models 10-11
+
+## ARIMA
+
+We'll start by modeling the total_drawl with ARIMA. 
+
+### Model 1 - Basic Auto ARIMA
+
+Let's start with a Basic Auto ARIMA:
+
+- Start with `arima_reg()` to begin the specification
+- Pipe into `set_engine()`. Specify "auto_arima" as the engine. 
+- Pipe into `fit()`:
+    - Use formula = `total_drawl ~ timestamp`
+    - Set `data = training(splits)`
+- Store the output as `model_fit_1_arima_basic`
+- Print the output and check out the parameters & AIC.
+
+```{r, message = T}
+# model_fit_1_arima_basic <- arima_reg() %>%
+#    set_engine("auto_arima") %>%
+#    fit(total_drawl ~ timestamp, data = training(splits))
+
+
+
+#write_rds(model_fit_1_arima_basic, "data/model_fit_1_arima_basic.rds")
+
+# Checkpoint data
+model_fit_1_arima_basic <- read_rds("data/model_fit_1_arima_basic.rds")
+
+
+model_fit_1_arima_basic
+
+
+
+```
+
+Questions:
+- What are the ARIMA orders? 
+    - How many lags were used?
+    - Was differencing performed?
+    - Were any lagged error features used?
+- Did modeltime auto-generate a frequency for ARIMA?
+- Is this a seasonal model?
+
+### Model 2 - Add Product Events
+
+Next, repeat the model this time adding events:
+
+- Modify the previous formula to include `event_november_sale` and `event_product_launch`
+- Store the object as `model_fit_2_arima_xregs`
+- Print the output to the screen. 
+
+Questions:
+- Has the AIC improved? 
+- What coefficients do you see in your model?
+- Is this a seasonal model?
+
+```{r, message = T}
+#model_fit_2_arima_xregs <- arima_reg() %>%
+#    set_engine("auto_arima") %>%
+#    fit(total_drawl ~ timestamp 
+#        + sunday
+#       + saturday, 
+#      data = training(splits))
+
+#write_rds(model_fit_2_arima_xregs, "data/model_fit_2_arima_xregs.rds")
+
+# Checkpoint data
+model_fit_2_arima_xregs <- read_rds("data/model_fit_2_arima_xregs.rds")
+
+model_fit_2_arima_xregs
+
+```
+
+### Model 3 - Add Seasonality + Product Events
+
+Use `plot_acf_diagnostics()` to inspect the ACF of your ARIMA model as follows:
+
+- If a Difference was used in your ARIMA models, then apply differencing using `diff_vec()`
+
+Question:
+- Do you see any spikes in ACF Lags?
+- Do you see any spikes in PACF Lags?
+
+```{r, message = T}
+training(splits) %>%
+    plot_acf_diagnostics(timestamp, .value = diff_vec(total_drawl))
+
+```
+
+
+Make your 3rd Auto ARIMA model the same as your 2nd model (include events in your model formula). This time:
+
+- Set `arima_reg(seasonal_period = 4)` to capture the ACF Lag 4 as a seasonality
+- Store as `model_fit_3_arima_sarimax`
+
+Question:
+- Is this a seasonal model?
+
+
+```{r}
+# model_fit_3_arima_sarimax <- arima_reg(
+#        seasonal_period = 32
+#    ) %>%
+#    set_engine("auto_arima") %>%
+#   fit(total_drawl ~ timestamp 
+#       + sunday
+#       + saturday, 
+#       data = training(splits))
+
+#write_rds(model_fit_3_arima_sarimax, "data/model_fit_3_arima_sarimax.rds")
+
+# Checkpoint data
+model_fit_3_arima_sarimax <- read_rds("data/model_fit_3_arima_sarimax.rds")
+
+
+model_fit_3_arima_sarimax
+```
+
+### Model 4 - Force Seasonality w/ Regular ARIMA
+
+We can force seasonality using Regular (non-auto) ARIMA.
+
+- Start with `arima_reg()`:
+    - Set `seasonal_period = 4` to force a 4-period (monthly) seasonality
+    - Set your non seasonal arima parameters to (2,1,2) 
+    - Set your seasonal arima parameters to (1,0,1)
+- Set your engine to `"arima"`
+- Use the formula with events added. 
+- Store your model as `model_fit_4_arima_sarimax`
+
+Questions:
+- Is this a seasonal model?
+- Does adding the seasonality seem to improve the ARIMA model?
+
+```{r}
+# model_fit_4_arima_sarimax <- arima_reg(
+#         seasonal_period          = 32,
+#         # Non-Seasonal Terms
+#         non_seasonal_ar          = 2,
+#         non_seasonal_differences = 1, 
+#         non_seasonal_ma = 2, 
+#         # Seasonal Terms
+#         seasonal_ar = 1, 
+#         seasonal_differences = 0, 
+#         seasonal_ma = 1
+#     ) %>%
+#    fit(total_drawl ~ timestamp 
+#         + sunday
+#         + saturday, 
+#         data = training(splits))
+
+#write_rds(model_fit_4_arima_sarimax, "data/model_fit_4_arima_sarimax.rds")
+
+# Checkpoint data
+model_fit_4_arima_sarimax  <- read_rds("data/model_fit_4_arima_sarimax.rds")
+
+
+model_fit_4_arima_sarimax
+```
+
+### Model 5 - Use Fourier Terms + Product Events instead of Seasonality
+
+Last try to improve the Auto ARIMA model. Let's add a fourier series at period = 4 to try to capture the strong ACF in Lag 4.
+
+- Start with `arima_reg()`
+- Pipe into `set_engine()` using "auto_arima"
+- Use a formula that includes events
+- Add to your forumla a `fourier_vec()` at `period = 4`. 
+- Store your model as `model_fit_5_arima_xreg_fourier`
+- Print the model 
+
+Questions:
+- Does the added fourier term seem to improve the AIC of the model?
+
+```{r}
+# model_fit_5_arima_xreg_fourier <- arima_reg() %>%
+#     set_engine("auto_arima") %>%
+#     fit(total_drawl ~ timestamp 
+#         + fourier_vec(timestamp, period = 32)
+#         + sunday
+#         + saturday, 
+#         data = training(splits))
+
+#write_rds(model_fit_5_arima_xreg_fourier, "data/model_fit_5_arima_xreg_fourier.rds")
+
+# Checkpoint data
+model_fit_5_arima_xreg_fourier  <- read_rds("data/model_fit_5_arima_xreg_fourier.rds")
+
+model_fit_5_arima_xreg_fourier
+```
+
+### Investigate - Modeltime Workflow
+
+Next, we need to investigate our ARIMA models. 
+
+#### Model Table
+
+Use `modeltime_table()` to consolidate Models 1 - 5 (ARIMA models). Save the modeltime table as `model_tbl_arima`.
+
+```{r}
+model_tbl_arima <- modeltime_table(
+    model_fit_1_arima_basic,
+    model_fit_2_arima_xregs,
+    model_fit_3_arima_sarimax,
+    model_fit_4_arima_sarimax,
+    model_fit_5_arima_xreg_fourier
+)
+
+model_tbl_arima
+```
+
+
+#### Calibration Table
+
+Use `modeltime_calibrate()` to calibrate your models on the testing split. 
+
+```{r}
+calibration_tbl <- model_tbl_arima %>%
+    modeltime_calibrate(testing(splits))
+
+calibration_tbl
+```
+
+#### Test Accuracy
+
+Use `modeltime_accuracy()` to calculate the test accuracy. 
+
+```{r}
+calibration_tbl %>% 
+    modeltime_accuracy() 
+```
+
+#### Test Forecast
+
+Make a test forecast using `modeltime_forecast()` and `plot_modeltime_forecast()`. Use the testing split and the `data_prepared_tbl`.
+
+```{r}
+calibration_tbl %>%
+    modeltime_forecast(
+        new_data = testing(splits),
+        actual_data = data_prepared_tbl
+    ) %>% 
+    plot_modeltime_forecast()
+
+```
+
+### ARIMA Forecast Review
+
+- Which ARIMA forecasts performed the best on the test data set?
+    - Which ARIMA forecasts had the lowest MAE / RMSE?
+    - Which ARIMA forecasts had the highest variance explained
+- How did the forecasts do predicting the global trend?
+- How did the forecasts do predicting the local trend?
+
+```{r}
+# Checkpoint data
+ #model_tbl_arima %>% write_rds("data/model_tbl_arima.rds")
+model_tbl_arima <- read_rds("data/model_tbl_arima.rds")
+model_tbl_arima
+```
+
+## Prophet 
+
+Next, let's experiment with the prophet algorithm.
+
+### Model 6 - Basic Prophet 
+
+First, train a basic `prophet` model:
+
+- Start with `prophet_reg()`. Use the default parameters. 
+- Set the engine to "prophet"
+- Fit the model to the training data using `total_drawl ~ timestamp`
+- Store the model as `model_fit_6_prophet_basic`
+
+
+```{r}
+# model_fit_6_prophet_basic <- prophet_reg(seasonality_yearly = FALSE) %>%
+#     set_engine("prophet") %>%
+#   
+#     fit(total_drawl ~ timestamp, data = training(splits))
+
+
+
+#write_rds(model_fit_6_prophet_basic, "data/model_fit_6_prophet_basic.rds")
+
+# Checkpoint data
+model_fit_6_prophet_basic  <- read_rds("data/model_fit_6_prophet_basic.rds")
+
+model_fit_6_prophet_basic
+
+
+```
+
+### Model 7 - Turn on yearly seasonality
+
+Next, let's try toggling yearly seasonality on. Make a new model called `model_fit_7_prophet_yearly` with `seasonality_yearly = TRUE`.
+
+```{r}
+# model_fit_7_prophet_yearly <- prophet_reg(seasonality_yearly = FALSE) %>%
+#     set_engine("prophet") %>%
+#     fit(total_drawl ~ timestamp, data = training(splits))
+
+#write_rds(model_fit_7_prophet_yearly, "data/model_fit_7_prophet_yearly.rds")
+
+# Checkpoint data
+model_fit_7_prophet_yearly  <- read_rds("data/model_fit_7_prophet_yearly.rds")
+
+
+model_fit_7_prophet_yearly
+```
+
+### Model 8 - Product Events
+
+Let's try one without yearly seasonality but now adding events. Make `model_fit_8_prophet_events` using the default settings for `prophet_reg()` and updating the fitting formula to include `event_november_sale` and `event_product_launch`. 
+
+```{r}
+# model_fit_8_prophet_events <- prophet_reg() %>%
+#     set_engine("prophet") %>%
+#     fit(total_drawl ~ timestamp 
+#         + sunday
+#         + saturday, 
+#         data = training(splits))
+
+#write_rds(model_fit_8_prophet_events, "data/model_fit_8_prophet_events.rds")
+
+# Checkpoint data
+model_fit_8_prophet_events  <- read_rds("data/model_fit_8_prophet_events.rds")
+
+model_fit_8_prophet_events
+```
+
+### Model 9 - Events + Fourier Series
+
+Let's try one more model that includes the events and a fourier series. Add a `fourier_vec()` with `period = 4`. Save this model as `model_fit_9_prophet_events_fourier`.
+
+```{r}
+# model_fit_9_prophet_events_fourier <- prophet_reg(seasonality_yearly = FALSE) %>%
+#     set_engine("prophet") %>%
+#     fit(total_drawl ~ timestamp 
+#         + fourier_vec(timestamp, period = c(32,64,96))
+#         + sunday
+#         + saturday, 
+#         data = training(splits))
+
+#write_rds(model_fit_9_prophet_events_fourier, "data/model_fit_9_prophet_events_fourier.rds")
+
+# Checkpoint data
+model_fit_9_prophet_events_fourier  <- read_rds("data/model_fit_9_prophet_events_fourier.rds")
+
+model_fit_9_prophet_events_fourier
+```
+
+### Investigate - Modeltime Workflow
+
+Now let's check out the results. 
+
+#### Model Table
+
+Create a modeltime table with each of the prophet models 6-9 in the table. Store as `model_tbl_prophet`.
+
+```{r}
+model_tbl_prophet <- modeltime_table(
+    model_fit_6_prophet_basic,
+    model_fit_7_prophet_yearly,
+    model_fit_8_prophet_events,
+    model_fit_9_prophet_events_fourier
+)
+
+model_tbl_prophet
+```
+
+
+#### Calibration Table
+
+Next, calibrate the models using your testing set. 
+
+```{r}
+calibration_tbl <- model_tbl_prophet %>%
+    modeltime_calibrate(testing(splits))
+
+calibration_tbl
+```
+
+#### Test Accuracy
+
+Calculate the accuracy with `modeltime_accuracy()`.
+
+```{r}
+calibration_tbl %>% modeltime_accuracy()
+```
+
+#### Test Forecast
+
+Finally, forecast the calibrated models on the testing data using `modeltime_forecast()` and `plot_modeltime_forecast()`.
+
+```{r}
+calibration_tbl %>%
+    modeltime_forecast(
+        new_data = testing(splits),
+        actual_data = data_prepared_tbl
+    ) %>% 
+    plot_modeltime_forecast()
+```
+
+### Prophet Forecast Review
+
+- Which Prophet forecasts performed the best on the test data set?
+    - Which Prophet forecasts had the lowest MAE / RMSE?
+    - Which Prophet forecasts had the highest variance explained
+- How did the forecasts do predicting the global trend?
+- How did the forecasts do predicting the local trend?
+
+```{r}
+# Checkpoint data
+#model_tbl_prophet %>% write_rds("data/model_tbl_prophet.rds")
+model_tbl_prophet <- read_rds("data/model_tbl_prophet.rds")
+model_tbl_prophet
+```
+
+
+## Exponential Smoothing
+
+Now let's try models that incorporate exponential smoothing. 
+
+### Model 10 - ETS
+
+The first model we'll experiment with is the automated "ETS" model:
+
+- Start with `exp_smoothing()`
+- Set the engine to "ets"
+- Fit the model to the training data using a formula `total_drawl ~ timestamp`
+- Save the model as `model_fit_10_ets`
+
+Question:
+
+- Review the ETS parameters:
+    - Is this an exponentially smoothed error model?
+    - Is this a trend model
+    - Is this a seasonal model?
+- How does the AIC compare to the AIC of the ARIMA model?
+
+
+```{r}
+# model_fit_10_ets <- exp_smoothing() %>%
+#     set_engine("ets") %>%
+#     fit(total_drawl ~ timestamp, training(splits))
+
+
+#write_rds(model_fit_10_ets, "data/model_fit_10_ets.rds")
+
+# Checkpoint data
+model_fit_10_ets  <- read_rds("data/model_fit_10_ets.rds")
+
+model_fit_10_ets
+```
+
+
+
+### Model 11 - TBATS
+
+Next, let's make a TBATS model. The seasonality we'll use is `seasonal_period_1 = 32` and `seasonal_period_2 = 13`.
+
+```{r}
+# model_fit_11_tbats <- seasonal_reg(
+#     seasonal_period_1 = 32,
+#     seasonal_period_2 = 64,
+#     seasonal_period_3 = 96
+# ) %>%
+#     set_engine("tbats") %>%
+#     fit(total_drawl ~ timestamp, data = training(splits))
+
+#write_rds(model_fit_11_tbats, "data/model_fit_11_tbats.rds")
+
+# Checkpoint data
+model_fit_11_tbats  <- read_rds("data/model_fit_11_tbats.rds")
+
+model_fit_11_tbats
+```
+
+
+### Investigate - Modeltime  Workflow
+
+Now let's check out the results. 
+
+#### Model Table
+
+Create a modeltime table with each of the exponential smoothing models 10-11 in the table. Store as `model_tbl_exp_smooth`.
+
+```{r}
+model_tbl_exp_smooth <- modeltime_table(
+    model_fit_10_ets, 
+    model_fit_11_tbats
+) 
+
+model_tbl_exp_smooth
+```
+
+#### Calibration Table
+
+Next, calibrate the models using your testing set. 
+
+```{r}
+calibration_tbl <- model_tbl_exp_smooth %>%
+    modeltime_calibrate(testing(splits))
+
+calibration_tbl
+```
+
+#### Test Accuracy
+
+Calculate the accuracy with `modeltime_accuracy()`.
+
+```{r}
+calibration_tbl %>% modeltime_accuracy()
+```
+
+#### Test Forecast
+
+Finally, forecast the calibrated models on the testing data using `modeltime_forecast()` and `plot_modeltime_forecast()`.
+
+```{r}
+calibration_tbl %>%
+    modeltime_forecast(
+        new_data = testing(splits),
+        actual_data = data_prepared_tbl
+    ) %>% 
+    plot_modeltime_forecast()
+```
+### Exponential Smoothing Forecast Review
+
+- Which Exponential Smoothing forecasts performed the best on the test data set?
+    - Which Exponential Smoothing forecasts had the lowest MAE / RMSE?
+    - Which Exponential Smoothing forecasts had the highest variance explained
+- How did the forecasts do predicting the global trend?
+- How did the forecasts do predicting the local trend?
+
+```{r}
+# Checkpoint data
+#model_tbl_exp_smooth %>% write_rds("data/model_tbl_exp_smooth.rds")
+model_tbl_exp_smooth <- read_rds("data/model_tbl_exp_smooth.rds")
+model_tbl_exp_smooth
+```
+
+
+
+# Forecast Future Data
+
+Forecast the future.
+
+```{r}
+# Checkpoint data
+model_tbl_arima      <- read_rds("data/model_tbl_arima.rds")
+model_tbl_prophet    <- read_rds("data/model_tbl_prophet.rds")
+model_tbl_exp_smooth <- read_rds("data/model_tbl_exp_smooth.rds")
+```
+
+
+### Model Table
+
+Create a Modeltime Table from the 3 previous Modeltime Tables using a new function, `combine_modeltime_tables`.
+
+Use `?combine_modeltime_tables` to learn about how the function works.
+
+Use the function to combine the 3 previous modeltime tables into a single modeltime table. Combine these Modeltime Tables: 
+    - `model_tbl_arima`
+    - `model_tbl_prophet`
+    - `model_tbl_exp_smooth`
+Store the combined modeltime tables as `model_tbl`
+
+```{r}
+model_tbl <- combine_modeltime_tables(
+    model_tbl_arima,
+    model_tbl_prophet,
+    model_tbl_exp_smooth
+)
+
+model_tbl
+```
+
+
+As a precautionary measure, please refit the models using `modeltime_refit()`. This prevents models that can go bad over time because of software changes. 
+
+```{r}
+# Refitting makes sure your models work over time. 
+# model_tbl <- model_tbl %>%
+#     modeltime_refit(training(splits))
+
+#write_rds(model_tbl, "data/model_tbl.rds")
+
+# Checkpoint data
+model_tbl  <- read_rds("data/model_tbl.rds")
+
+model_tbl
+```
+
+### Calibrate the Table
+
+Use testing data to calibrate the model:
+
+- Start with `model_tbl`
+- Use `modeltime_calibrate()` to calibrate the model using `testing(splits)` (out-of-sample data)
+- Store the result as `calibration_tbl`
+
+```{r}
+calibration_tbl <- model_tbl %>%
+    modeltime_calibrate(testing(splits))
+
+
+calibration_tbl
+```
+
+### Calculate the Accuracy
+
+Use `modeltime_accuracy()` to calculate the accuracy metrics.
+
+```{r}
+calibration_tbl %>% modeltime_accuracy()
+```
+
+### Visualize the Model Forecast
+
+- Use `modeltime_forecast()`:
+    - Set `new_data = testing(splits)`
+    - Set `actual_data = data_prepared_tbl`
+- Pipe the result into `plot_modeltime_forecast()`
+
+```{r}
+calibration_tbl %>%
+    modeltime_forecast(
+        new_data    = testing(splits),
+        actual_data = data_prepared_tbl
+    ) %>%
+    plot_modeltime_forecast()
+
+```
+
+
+
+### Refit
+
+- Start with the `calibration_tbl`
+- Use `modeltime_refit()` refit the model on the `data_prepared_tbl` dataset
+
+```{r}
+# refit_tbl <- calibration_tbl %>%
+#     modeltime_refit(data_prepared_tbl)
+
+
+#write_rds(refit_tbl, "data/refit_tbl.rds")
+
+# Checkpoint data
+refit_tbl  <- read_rds("data/refit_tbl.rds")
+
+refit_tbl
+
+
+```
+
+### Forecast Future 
+
+1. Start with `refit_tbl`
+2. Use `modeltime_forecast()` to forecast the `new_data = forecast_tbl`. Use `data_prepared_tbl` as the actual data. 
+3. Plot the forecast using `plot_modeltime_forecast()`
+
+```{r}
+refit_tbl %>%
+    modeltime_forecast(new_data    = forecast_tbl,
+                       actual_data = data_prepared_tbl) %>%
+    plot_modeltime_forecast()
+
+```
