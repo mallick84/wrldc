@@ -60,7 +60,9 @@ state_gen1 <- state_gen %>%
            rowSums(na.rm = TRUE))
   
   
-  
+# savingthis dataset
+
+#write_rds(state_gen1, path = 'data/state_gen1.rds')
  
           
 
@@ -312,6 +314,21 @@ create_report(data = state_gen1_daily,
 
 
 ```
+
+```
+
+
+### Forecasting of all the drawl parameter at a time
+
+```{r echo = TRUE}
+
+
+
+x %>%
+  pivot_longer(c(-Dt1, -Other_1)) %>%
+  separate(name, "_", into = c("Category", "measure")) %>%
+  spread(measure, value)
+
 
 ```
 
