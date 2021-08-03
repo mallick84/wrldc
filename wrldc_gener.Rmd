@@ -6,11 +6,15 @@ output: html_document
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE,
+    message = F,
+    warning = F,
+    paged.print = FALSE, 
+    # This should allow Rmarkdown to locate the data
+    root.dir = rprojroot::find_rstudio_root_file())
 ```
 
-## Load the libries 
-
+## Load the libries
 
 ```{r echo=TRUE}
 
@@ -19,19 +23,22 @@ library(timetk)
 library(lubridate)
 #library(skimr)
 library(DataExplorer)
+library(tidymodels)
+library(modeltime)
+
 
 
 ```
 
 ## Upload Data and data preparations
-### convert the Date colum to timeseries. Try to find out any abnormilities or missing values.
 
+### convert the Date colum to timeseries. Try to find out any abnormilities or missing values.
 
 ```{r echo=TRUE}
 
 state_gen <- vroom::vroom(file = 'data/state.csv')
 
-skim(state_gen)
+skimr::skim(state_gen)
 
 ## convert the date column character to time series
 
@@ -72,6 +79,7 @@ skimr::skim(state_gen1)
 ```
 
 ## Some visualisation
+
 ### Gujrat schedule
 
 ```{r echo=TRUE}
@@ -91,6 +99,7 @@ state_gen1 %>%
 ```
 
 ## Some visualisation
+
 ### groupwise visualisations
 
 ```{r echo=TRUE}
@@ -119,13 +128,12 @@ state_gen1 %>%
                      .color_var = name,
                      .facet_vars = name,
                      .interactive = TRUE,
-                     .smooth = FALSE)
+                     .smooth = FALSE, 
+                     .facet_collapse = TRUE)
 
 
 
 ```
-
-
 
 ## Visualize anomalies
 
@@ -153,17 +161,31 @@ state_gen1 %>%
                              .facet_ncol = 2
                              )
 
+### data anomaly
+state_gen1 %>% 
+  select(1,30:33) %>%
+  pivot_longer(-timestamp) %>%
+  group_by(name)%>%
+    tk_anomaly_diagnostics(.date_var = timestamp,
+                           .value =  value, 
+                           .message = TRUE
+                             
+                             )
+
+
 
 
 ```
 
 ## RANGE REDUCTION ----
+
 ### - Used in visualization to overlay series
+
 ### - Used in ML for models that are affected by feature magnitude (e.g. linear regression)
 
-### * Normalize to Range (0,1) ----
-### - INFO: recipes::step_range() is actually normalization to range(0,1)
+### \* Normalize to Range (0,1) ----
 
+### - INFO: recipes::step_range() is actually normalization to range(0,1)
 
 ```{r echo=TRUE}
 
@@ -237,25 +259,25 @@ state_gen1 %>%
 
 ```
 
+### Plot on seasonal diagnostic
+
 
 ```{r echo=True}
 
 state_gen1 %>%
   select(1,contains( 'Schedule')) %>%
   pivot_longer(-timestamp) %>%
-  group_by(name)%>%
+  
     plot_seasonal_diagnostics(.date_var =  timestamp, 
                               .value =  value
                               )
 
 
-par(mar=c(0,0,0,1))
-
 
  state_gen1 %>%
   select(1,contains( 'Schedule')) %>%
   pivot_longer(-timestamp) %>%
-  group_by(name)%>%
+ 
     plot_seasonal_diagnostics(.date_var =  timestamp, 
                               .value =  log(value + 1), .feature_set = 'week', .facet_vars = name
                               )
@@ -263,7 +285,7 @@ par(mar=c(0,0,0,1))
  state_gen1 %>%
   select(1,contains( 'Schedule')) %>%
   pivot_longer(-timestamp) %>%
-  group_by(name)%>%
+ 
     plot_seasonal_diagnostics(.date_var =  timestamp, 
                               .value =  log(value + 1), 
                               .feature_set = 'wday.lbl', 
@@ -273,24 +295,23 @@ par(mar=c(0,0,0,1))
 
 ```
 
-
 ### Summarise across group data
 
 ```{r echo=TRUE}
 # * To Daily - GA Summary ----
 
 state_gen1_daily <- state_gen1 %>%
-  select(1,contains( c('Schedule', 'Drawal'))) %>%
+  select(1,contains(  'Drawal')) %>%
   summarise_by_time(
     .date_var = timestamp, 
     .by       = 'day',
-    across(.cols = CHHATTISGARH_Schedule:BARC_Drawal, .fns = sum)
+    across(.cols = CHHATTISGARH_Drawal:BARC_Drawal, .fns = sum)
   )
 
 state_gen1_daily
 
 state_gen1_daily  %>%
-  pivot_longer(cols = CHHATTISGARH_Schedule:BARC_Drawal) %>%
+  pivot_longer(cols = CHHATTISGARH_Drawal:BARC_Drawal) %>%
   plot_time_series(timestamp, .value = value, .facet_vars = name, .smooth = FALSE, .facet_ncol = 3, .facet_scales = 'free', .facet_collapse_sep = TRUE)
 
 
@@ -299,36 +320,184 @@ state_gen1_daily  %>%
 ### Data explore
 
 ```{r echo=FALSE}
-state_gen1_daily <- state_gen1 %>%
-  summarise_by_time(
-    .date_var = timestamp, 
-    .by       = 'day',
-    across(.cols = CHHATTISGARH_Schedule:BARC_Drawal, .fns = sum)
-  )
-
-
-create_report(data = state_gen1_daily, 
-                            report_title = 'Full Analytical report for the month of May', 
-                            y = 'MADHYAPRADESH_Schedule')
-
+# state_gen1_daily <- state_gen1 %>%
+#   summarise_by_time(
+#     .date_var = timestamp, 
+#     .by       = 'day',
+#     across(.cols = CHHATTISGARH_Schedule:BARC_Drawal, .fns = sum)
+#   )
+# 
+# 
+# create_report(data = state_gen1_daily, 
+#                             report_title = 'Full Analytical report for the month of May', 
+#                             y = 'MADHYAPRADESH_Schedule')
+# 
 
 
 ```
-
-```
-
 
 ### Forecasting of all the drawl parameter at a time
 
 ```{r echo = TRUE}
 
+## some data preparation 
 
+state_demand <- state_gen1 %>%
+  select(1,contains( 'Drawal')) %>%
+  pivot_longer(-timestamp) %>%
+  group_by(name) %>%
+  relocate( name,  
+            .before = timestamp
+            ) %>%
+  arrange(name )%>%
+  set_names(c("state", "timestamp", "demand")) %>%
+  mutate_at(.vars = 'state', .funs = as.factor)
 
-x %>%
-  pivot_longer(c(-Dt1, -Other_1)) %>%
-  separate(name, "_", into = c("Category", "measure")) %>%
-  spread(measure, value)
+ 
+  
+state_demand
+
 
 
 ```
 
+## **Visualize the Data**
+
+From visualizing, the daily demand patterns emerge. Most of the series have daily seasonality and long-term trends.
+
+```{r}
+
+state_demand %>%
+  group_by(state) %>%
+  plot_time_series(
+    .date_var    = timestamp,
+    .value       = demand,
+    .facet_ncol  = 3,
+    .interactive = TRUE, 
+    .facet_collapse = TRUE
+  )
+
+```
+
+## **Train/Test Splitting**
+
+We can split the data into training and testing sets using `time_series_split()`. We'll investigate the last 1 day of the month to test a global model on a 3-day forecast. The message on overlapping dates is to let us know that multiple time series are being processed using the last 3-day window for testing.
+
+```{r}
+
+state_demand_split <- state_demand %>% 
+  time_series_split(assess = "3 day", cumulative = TRUE)
+
+state_demand_split
+
+```
+
+## **Feature Engineering (Recipe)**
+
+We can move to preprocessing the data. We will use the `recipes` workflow for generating time series features.
+
+-   This results in 35 derived features for modeling.
+
+```{r}
+
+state_demand_recipe <- recipe(demand ~ ., training(state_demand_split)) %>%
+    step_mutate(state = droplevels(state)) %>%
+    step_timeseries_signature(timestamp) %>%
+    step_rm(timestamp) %>%
+    step_zv(all_predictors()) %>%
+    step_dummy(all_nominal_predictors(), one_hot = TRUE)
+
+summary(prep(state_demand_recipe))
+
+```
+
+## **Machine Learning**
+
+We'll create an `xgboost` workflow by fitting the default xgboost model to our derived features from our in-sample training data set.
+
+-   We create a **Global XGBOOST Model**, a single model that forecasts all of our time series
+
+-   Training the global xgboost model takes **approximately 50 milliseconds**.
+
+-   Conversely, an ARIMA model might take **several minutes** to iterate through possible parameter combinations for each of the 9 time series.
+
+```{r}
+# Workflow
+
+state_demand_wflw_xgb <- workflow() %>%
+    add_model(
+        boost_tree() %>% set_engine("xgboost")
+    ) %>%
+    add_recipe(state_demand_recipe) %>%
+    fit(training(state_demand_split))
+
+state_demand_wflw_xgb
+```
+
+### **Create a Modeltime Table**
+
+First, we create a **Modeltime Table** using `modeltime_table()`.
+
+```{r}
+state_demand_model_tbl <- modeltime_table(
+   state_demand_wflw_xgb
+)
+
+state_demand_model_tbl
+```
+
+### **Calibrate by ID**
+
+Next, we calibrate. **Calibration** calculates the out of sample residual error.
+
+```{r}
+
+state_demand_calib_tbl <- state_demand_model_tbl %>%
+    modeltime_calibrate(new_data = testing(state_demand_split), id = 'state'
+    )
+
+state_demand_calib_tbl
+```
+
+## **Measure Accuracy**
+
+Next, we measure the global and local accuracy on the global model.
+
+### **Global Accuracy**
+
+**Global Accuracy** is the overall accuracy of the test forecasts, which simply returns an aggregated error without taking into account that there are multiple time series. The default is `modeltime_accuracy(acc_by_id = FALSE)`, which returns a global model accuracy.
+
+```{r}
+state_demand_calib_tbl %>% 
+    modeltime_accuracy(acc_by_id = FALSE) %>% 
+    table_modeltime_accuracy(.interactive = TRUE)
+```
+
+### **Local Accuracy**
+
+The **drawback with the global accuracy** is that the model may not perform well on specific time series. By toggling `modeltime_accuracy(acc_by_id = TRUE)`, we can obtain the **Local Accuracy**, which is the accuracy that the model has on each of the time series groups. This can be useful for identifying specifically which time series the model does well on (and which it does poorly on). We can then **apply model selection logic** to select specific global models for specific IDs.
+
+```{r}
+state_demand_calib_tbl %>% 
+    modeltime_accuracy(acc_by_id = TRUE) %>% 
+    table_modeltime_accuracy(.interactive = TRUE)
+
+```
+
+## **Forecast the Data**
+
+The last step we'll cover is forecasting the test dataset. This is useful to evaluate the model using a sampling of the time series within the panel dataset. we now have `modeltime_forecast(conf_by_id = TRUE)` to allow the confidence intervals (prediction intervals) to be calculated by time series identifier. Note, that the `modeltime_calibrate()` must have been performed with an `id` specified.
+
+```{r}
+state_demand_calib_tbl %>%
+    modeltime_forecast(
+        new_data    = testing(state_demand_split),
+        actual_data = bind_rows(training(state_demand_split), testing(state_demand_split)),
+        conf_by_id  = TRUE
+    ) %>%
+    group_by(state) %>%
+    plot_modeltime_forecast(
+        .facet_ncol  = 3,
+        .interactive = TRUE
+    )
+```
